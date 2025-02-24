@@ -2,132 +2,77 @@
 set -e
 
 ########################################
-# 1. Update System & Install Prerequisites
+# Nagios Core Uninstallation Script
+# This script stops and disables the Nagios service,
+# removes the installed files (including the installation
+# directory and Apache configuration), and optionally
+# deletes the nagios user and nagcmd group.
 ########################################
-echo "Updating system packages..."
-yum update -y
 
-echo "Installing required packages..."
-yum install -y httpd php gcc glibc glibc-common gd gd-devel make net-snmp \
-    openssl wget unzip httpd-tools policycoreutils-python
+echo "----------------------------------------"
+echo "Nagios Core Uninstallation Script Started"
+echo "----------------------------------------"
 
-########################################
-# 2. Create Nagios User and Groups
-########################################
-echo "Creating nagios user and nagcmd group (if they don't exist)..."
-if ! id nagios &>/dev/null; then
-    useradd nagios
+# Step 1: Stop and disable the Nagios service
+echo "Stopping Nagios service (if running)..."
+if systemctl is-active --quiet nagios; then
+    systemctl stop nagios
+    echo "Nagios service stopped."
+else
+    echo "Nagios service is not running."
 fi
 
-if ! getent group nagcmd &>/dev/null; then
-    groupadd nagcmd
+echo "Disabling Nagios service..."
+if systemctl is-enabled --quiet nagios; then
+    systemctl disable nagios
+    echo "Nagios service disabled."
+else
+    echo "Nagios service was not enabled."
 fi
 
-# Add both nagios and Apache users to the nagcmd group
-usermod -a -G nagcmd nagios
-usermod -a -G nagcmd apache
-
-########################################
-# 3. Download, Compile, and Install Nagios Core (v4.5.9)
-########################################
-NAGIOS_CORE_VERSION="4.5.9"
-cd /tmp
-echo "Downloading Nagios Core v${NAGIOS_CORE_VERSION}..."
-wget https://assets.nagios.com/downloads/nagioscore/releases/nagios-${NAGIOS_CORE_VERSION}.tar.gz
-
-echo "Extracting Nagios Core..."
-tar zxvf nagios-${NAGIOS_CORE_VERSION}.tar.gz
-cd nagios-${NAGIOS_CORE_VERSION}
-
-echo "Configuring Nagios Core..."
-./configure --with-command-group=nagcmd
-
-echo "Compiling Nagios Core..."
-make all
-
-echo "Installing Nagios Core..."
-make install
-make install-init
-make install-commandmode
-make install-config
-make install-webconf
-
-########################################
-# 4. Configure the Nagios Web Interface
-########################################
-echo "Setting up Nagios web interface user (nagiosadmin)..."
-read -p "Enter password for nagiosadmin: " NAGIOS_PASS
-htpasswd -cb /usr/local/nagios/etc/htpasswd.users nagiosadmin "$NAGIOS_PASS"
-
-########################################
-# 5. Download, Compile, and Install Nagios Plugins (v2.4.3)
-########################################
-NAGIOS_PLUGINS_VERSION="2.4.3"
-cd /tmp
-echo "Downloading Nagios Plugins v${NAGIOS_PLUGINS_VERSION}..."
-wget https://nagios-plugins.org/download/nagios-plugins-${NAGIOS_PLUGINS_VERSION}.tar.gz
-
-echo "Extracting Nagios Plugins..."
-tar zxvf nagios-plugins-${NAGIOS_PLUGINS_VERSION}.tar.gz
-cd nagios-plugins-${NAGIOS_PLUGINS_VERSION}
-
-echo "Configuring Nagios Plugins..."
-./configure --with-nagios-user=nagios --with-nagios-group=nagios
-
-echo "Compiling Nagios Plugins..."
-make
-
-echo "Installing Nagios Plugins..."
-make install
-
-########################################
-# 6. SELinux Adjustments (if Enabled)
-########################################
-if sestatus | grep "SELinux status:" | grep -q "enabled"; then
-    echo "SELinux is enabled. Adjusting file contexts..."
-    semanage fcontext -a -t httpd_sys_content_t "/usr/local/nagios(/.*)?"
-    restorecon -Rv /usr/local/nagios
-    # Allow Apache to connect to Nagios resources
-    setsebool -P httpd_can_connect_nagios=1
+# Step 2: Remove the init script (if installed)
+if [ -f /etc/init.d/nagios ]; then
+    echo "Removing Nagios init script at /etc/init.d/nagios..."
+    rm -f /etc/init.d/nagios
+else
+    echo "No Nagios init script found at /etc/init.d/nagios."
 fi
 
-########################################
-# 7. Update Apache Configuration for Nagios
-########################################
-echo "Ensuring Apache is configured to allow access to Nagios..."
-NAGIOS_CONF="/etc/httpd/conf.d/nagios.conf"
-if [ -f "$NAGIOS_CONF" ]; then
-    # Modify the Directory block for /usr/local/nagios/share if necessary.
-    sed -i '/<Directory "\/usr\/local\/nagios\/share">/,/<\/Directory>/ {
-        s/AllowOverride None/AllowOverride All/g;
-        s/Order allow,deny/Require all granted/g;
-    }' "$NAGIOS_CONF"
+# Step 3: Remove the Nagios installation directory
+if [ -d /usr/local/nagios ]; then
+    echo "Removing Nagios installation directory (/usr/local/nagios)..."
+    rm -rf /usr/local/nagios
+else
+    echo "Nagios installation directory (/usr/local/nagios) not found."
 fi
 
-########################################
-# 8. Enable and Start Services
-########################################
-echo "Enabling and starting Apache (httpd) and Nagios services..."
-systemctl enable httpd
-systemctl start httpd
-
-systemctl enable nagios
-systemctl start nagios
-
-########################################
-# 9. Configure iptables Firewall (Allow HTTP/HTTPS)
-########################################
-echo "Configuring iptables to allow HTTP (port 80) and HTTPS (port 443) traffic..."
-iptables -I INPUT -p tcp --dport 80 -j ACCEPT
-iptables -I INPUT -p tcp --dport 443 -j ACCEPT
-iptables-save > /etc/sysconfig/iptables
-
-if systemctl is-active --quiet iptables; then
-    systemctl restart iptables
+# Step 4: Remove Apache's Nagios configuration file
+if [ -f /etc/httpd/conf.d/nagios.conf ]; then
+    echo "Removing Apache Nagios configuration (/etc/httpd/conf.d/nagios.conf)..."
+    rm -f /etc/httpd/conf.d/nagios.conf
+else
+    echo "Apache Nagios configuration file not found."
 fi
 
-########################################
-# Final Message
-########################################
-echo "Nagios Core installation (v${NAGIOS_CORE_VERSION}) with Plugins (v${NAGIOS_PLUGINS_VERSION}) is complete."
-echo "Access the Nagios web interface at: http://<your_server_ip>/nagios"
+# Step 5: Optionally remove nagios user and nagcmd group
+read -p "Do you want to remove the nagios user and nagcmd group? [y/N]: " REMOVE_USER
+if [[ "$REMOVE_USER" =~ ^[Yy]$ ]]; then
+    if id nagios &>/dev/null; then
+        echo "Removing nagios user..."
+        userdel nagios
+    else
+        echo "nagios user does not exist."
+    fi
+
+    if getent group nagcmd &>/dev/null; then
+        echo "Removing nagcmd group..."
+        groupdel nagcmd
+    else
+        echo "nagcmd group does not exist."
+    fi
+fi
+
+echo "----------------------------------------"
+echo "Nagios Core uninstallation complete."
+echo "You can now proceed with your Nagios XI installation."
+echo "----------------------------------------"
