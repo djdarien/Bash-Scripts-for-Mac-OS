@@ -1,0 +1,158 @@
+#!/bin/bash
+#
+# machine-save
+# Updated to force LAN IP usage instead of external hostname
+#
+
+MDIR="$HOME/backup/machines"
+
+FILES="
+/etc/facter
+/etc/httpd/certs
+/etc/nginx/certs
+/etc/openvpn
+/etc/puppet/puppet.conf
+/etc/puppetlabs/puppet/puppet.conf
+/etc/puppetlabs/puppet/ssl
+/etc/ssh
+/etc/stunnel/certs
+/opt/alarm_simulator/certs
+/opt/iris/certs
+/opt/iris/home/.ssh/authorized_keys
+/opt/iris/home/.ssh/id_rsa
+/opt/iris/home/.ssh/id_rsa.pub
+/var/lib/puppet/ssl
+"
+
+###############################################################################
+# Define a mapping of hostnames to LAN IPs
+declare -A HOST_IP_MAP
+HOST_IP_MAP["server1.example.com"]="192.168.1.100"
+HOST_IP_MAP["server2.example.com"]="192.168.1.101"
+
+###############################################################################
+# Function to resolve FQDN to LAN IP
+function fqdn {
+    NAME="${1:?fqdn: no name specified}"
+
+    # Use predefined LAN IP if available
+    if [[ -n "${HOST_IP_MAP[$NAME]}" ]]; then
+        IP="${HOST_IP_MAP[$NAME]}"
+    else
+        IP="$( host $NAME | awk '/ has address /{print $4}' | head -1 )"
+    fi
+
+    if [[ -z "$IP" ]]; then
+        echo "ERROR: \"$NAME\" does not resolve to an IP"
+        exit 1
+    fi
+
+    echo "$IP"
+}
+
+###############################################################################
+###############################################################################
+###############################################################################
+
+ALL=false
+V=""
+U="$( whoami )"
+
+while getopts ":avu:" opt
+do
+    case $opt in
+        a)  ALL=true
+            ;;
+        v)  V="v"
+            ;;
+        u)  U="$OPTARG"
+            ;;
+        \?)
+            echo "unknown option '-$OPTARG'" >&2
+            exit 1
+            ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+########################################
+# Figure out what we're backing up
+
+if [[ -n "${1:-}" ]]
+then
+    if $ALL
+    then
+        echo "ERROR: cannot specify targets with -a"
+        exit 1
+    fi
+
+    TARGETLIST="$*"
+elif $ALL
+then
+    TARGETLIST=$( ls -lF $MDIR | grep ^l | sed '{s/@.*//;s/^.* //;}' )
+else
+    echo "ERROR: no targets specified"
+    exit 1
+fi
+
+########################################
+
+mkdir -p "$MDIR"
+
+for TARGET in $TARGETLIST
+do
+    NOW=$( date +%Y-%m-%d.%H%M%S )
+
+    IP="$( fqdn $TARGET )"
+    echo "===== saving $TARGET - $IP ====="
+
+    mkdir -p "$MDIR/$TARGET.$NOW" || exit 1
+    cd "$MDIR/$TARGET.$NOW"
+
+    ########################################
+    # Do the deed
+
+    ssh -x \
+        -o ConnectTimeout=15 \
+        -l "$U" \
+        "$IP" "sudo bash -c 'cd / ; tar cf - $( echo $FILES ) 2>/dev/null'" \
+        | tar x${V}pf -
+
+    ########################################
+    # Remove things we explicitly don't want saved, and fix SSH key permissions
+
+    rm -f "$MDIR/$TARGET.$NOW"/etc/ssh/moduli \
+          "$MDIR/$TARGET.$NOW"/etc/ssh/*config \
+          "$MDIR/$TARGET.$NOW"/etc/ssh/*.rpmnew \
+          "$MDIR/$TARGET.$NOW"/etc/ssh/*.rpmsave \
+          "$MDIR/$TARGET.$NOW"/etc/ssh/ssh_known_hosts
+
+    chmod go= "$MDIR/$TARGET.$NOW"/etc/ssh/*key
+
+    ########################################
+    # If it succeeded, check/create/update the symlink
+
+    if [ -f "$MDIR/$TARGET.$NOW/etc/ssh/ssh_host_rsa_key" ]
+    then
+        if [[ -e "$MDIR/$TARGET" ]]
+        then
+            # Compare with last backup
+            if diff -qr "$MDIR/$TARGET" "$MDIR/$TARGET.$NOW" > /dev/null 2>&1
+            then
+                echo "NOTE: backup is identical to last good backup"
+                rm -rf "$MDIR/$TARGET.$NOW"
+                touch -h "$MDIR/$TARGET"
+            else
+                echo "NOTE: backup has changed since last good backup, moving symlink"
+                rm "$MDIR/$TARGET"
+                ln -s "$TARGET.$NOW" "$MDIR/$TARGET"
+            fi
+        else
+            echo "NOTE: no last good backup found, creating symlink"
+            ln -s "$TARGET.$NOW" "$MDIR/$TARGET"
+        fi
+    else
+        echo "NOTE: /etc/ssh/ssh_host_rsa_key was not backed up, ignoring this backup"
+    fi
+done
